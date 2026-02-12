@@ -24,7 +24,9 @@ import (
 	"github.com/google/osv-scalibr/inventory"
 	"github.com/google/osv-scalibr/log"
 	"github.com/google/osv-scalibr/plugin"
+	"github.com/google/osv-scanner/v2/internal/apiconfig"
 	"github.com/google/osv-scanner/v2/internal/cmdlogger"
+	depsdevpypi "github.com/google/osv-scanner/v2/internal/depsdev"
 	"github.com/google/osv-scanner/v2/internal/scalibrextract/filesystem/vendored"
 	"github.com/google/osv-scanner/v2/internal/scalibrextract/language/java/pomxmlenhanceable"
 	"github.com/google/osv-scanner/v2/internal/scalibrextract/vcs/gitcommitdirect"
@@ -38,7 +40,9 @@ var ErrExtractorNotFound = errors.New("could not determine extractor suitable to
 
 func configurePlugins(plugins []plugin.Plugin, accessors ExternalAccessors, actions ScannerActions) {
 	for _, plug := range plugins {
-		if !actions.TransitiveScanning.Disabled {
+		// Only enhance pom.xml with Maven Central when explicitly using native data source.
+		// By default, Maven transitive deps are resolved by the deps.dev REST enricher.
+		if !actions.TransitiveScanning.Disabled && actions.TransitiveScanning.NativeDataSource {
 			err := pomxmlenhanceable.EnhanceIfPossible(plug, &cpb.PluginConfig{
 				UserAgent: actions.RequestUserAgent,
 				PluginSpecific: []*cpb.PluginSpecificConfig{
@@ -46,7 +50,7 @@ func configurePlugins(plugins []plugin.Plugin, accessors ExternalAccessors, acti
 						Config: &cpb.PluginSpecificConfig_PomXmlNet{
 							PomXmlNet: &cpb.POMXMLNetConfig{
 								UpstreamRegistry:    actions.TransitiveScanning.MavenRegistry,
-								DepsDevRequirements: !actions.TransitiveScanning.NativeDataSource,
+								DepsDevRequirements: false,
 							},
 						},
 					},
@@ -77,6 +81,16 @@ func isRequirementsExtractorEnabled(plugins []plugin.Plugin) bool {
 	return false
 }
 
+func isPomXMLExtractorEnabled(plugins []plugin.Plugin) bool {
+	for _, plug := range plugins {
+		if plug.Name() == "java/pomxmlenhanceable" || plug.Name() == "java/pomxml" {
+			return true
+		}
+	}
+
+	return false
+}
+
 func getPlugins(defaultPlugins []string, accessors ExternalAccessors, actions ScannerActions) []plugin.Plugin {
 	if !actions.PluginsNoDefaults {
 		actions.PluginsEnabled = append(actions.PluginsEnabled, defaultPlugins...)
@@ -94,11 +108,29 @@ func getPlugins(defaultPlugins []string, accessors ExternalAccessors, actions Sc
 
 	// TODO: Use Enricher.RequiredPlugins to check this generically
 	if !actions.TransitiveScanning.Disabled && isRequirementsExtractorEnabled(plugins) {
-		p, err := transitivedependencyrequirements.New(&cpb.PluginConfig{
-			UserAgent: actions.RequestUserAgent,
-		})
+		var p plugin.Plugin
+		var err error
+		if actions.TransitiveScanning.NativeDataSource {
+			// Use native PyPI registry (downloads .whl/.tar.gz files — slower)
+			p, err = transitivedependencyrequirements.New(&cpb.PluginConfig{
+				UserAgent: actions.RequestUserAgent,
+			})
+		} else {
+			// Use deps.dev REST API for pre-computed dependency graphs (fast)
+			p, err = depsdevpypi.NewPyPIDepsDevEnricher(apiconfig.DepsDevAPIURL)
+		}
 		if err != nil {
 			log.Errorf("Failed to make transitivedependencyrequirements enricher: %v", err)
+		} else {
+			plugins = append(plugins, p)
+		}
+	}
+
+	// Maven: Use deps.dev REST API for transitive dependency resolution (through proxy)
+	if !actions.TransitiveScanning.Disabled && !actions.TransitiveScanning.NativeDataSource && isPomXMLExtractorEnabled(plugins) {
+		p, err := depsdevpypi.NewMavenDepsDevEnricher(apiconfig.DepsDevAPIURL)
+		if err != nil {
+			log.Errorf("Failed to make Maven deps.dev enricher: %v", err)
 		} else {
 			plugins = append(plugins, p)
 		}
