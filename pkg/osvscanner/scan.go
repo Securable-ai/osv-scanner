@@ -24,7 +24,9 @@ import (
 	"github.com/google/osv-scalibr/inventory"
 	"github.com/google/osv-scalibr/log"
 	"github.com/google/osv-scalibr/plugin"
+	"github.com/google/osv-scanner/v2/internal/apiconfig"
 	"github.com/google/osv-scanner/v2/internal/cmdlogger"
+	depsdevpypi "github.com/google/osv-scanner/v2/internal/depsdev"
 	"github.com/google/osv-scanner/v2/internal/scalibrextract/filesystem/vendored"
 	"github.com/google/osv-scanner/v2/internal/scalibrextract/language/java/pomxmlenhanceable"
 	"github.com/google/osv-scanner/v2/internal/scalibrextract/vcs/gitcommitdirect"
@@ -46,7 +48,7 @@ func configurePlugins(plugins []plugin.Plugin, accessors ExternalAccessors, acti
 						Config: &cpb.PluginSpecificConfig_PomXmlNet{
 							PomXmlNet: &cpb.POMXMLNetConfig{
 								UpstreamRegistry:    actions.TransitiveScanning.MavenRegistry,
-								DepsDevRequirements: !actions.TransitiveScanning.NativeDataSource,
+								DepsDevRequirements: false, // Always use Maven Central HTTP, never gRPC deps.dev
 							},
 						},
 					},
@@ -94,9 +96,17 @@ func getPlugins(defaultPlugins []string, accessors ExternalAccessors, actions Sc
 
 	// TODO: Use Enricher.RequiredPlugins to check this generically
 	if !actions.TransitiveScanning.Disabled && isRequirementsExtractorEnabled(plugins) {
-		p, err := transitivedependencyrequirements.New(&cpb.PluginConfig{
-			UserAgent: actions.RequestUserAgent,
-		})
+		var p plugin.Plugin
+		var err error
+		if actions.TransitiveScanning.NativeDataSource {
+			// Use native PyPI registry (downloads .whl/.tar.gz files — slower)
+			p, err = transitivedependencyrequirements.New(&cpb.PluginConfig{
+				UserAgent: actions.RequestUserAgent,
+			})
+		} else {
+			// Use deps.dev REST API for pre-computed dependency graphs (fast)
+			p, err = depsdevpypi.NewPyPIDepsDevEnricher(apiconfig.DepsDevAPIURL)
+		}
 		if err != nil {
 			log.Errorf("Failed to make transitivedependencyrequirements enricher: %v", err)
 		} else {
