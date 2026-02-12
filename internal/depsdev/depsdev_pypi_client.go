@@ -39,28 +39,40 @@ type DepsDevEdge struct {
 	Requirement string `json:"requirement"`
 }
 
-// PyPIDepsDevClient fetches pre-computed dependency graphs from the deps.dev REST API.
-type PyPIDepsDevClient struct {
+// DepsDevRESTClient fetches pre-computed dependency graphs from the deps.dev REST API.
+// It supports any system (pypi, maven, npm, etc.) via the system field.
+type DepsDevRESTClient struct {
 	baseURL string
+	system  string // e.g. "pypi", "maven"
 	mu      sync.Mutex
 	cache   map[string]*DepsDevDependencyGraph
 }
 
-// NewPyPIDepsDevClient creates a new client for the deps.dev REST API.
-// baseURL should be the deps.dev API endpoint, e.g. "https://api.deps.dev"
-// or a proxy like "https://data-api.codexsecurity.io/deps".
-func NewPyPIDepsDevClient(baseURL string) *PyPIDepsDevClient {
-	return &PyPIDepsDevClient{
+// PyPIDepsDevClient is an alias for backward compatibility.
+type PyPIDepsDevClient = DepsDevRESTClient
+
+// NewPyPIDepsDevClient creates a new client for PyPI dependencies via the deps.dev REST API.
+func NewPyPIDepsDevClient(baseURL string) *DepsDevRESTClient {
+	return &DepsDevRESTClient{
 		baseURL: baseURL,
+		system:  "pypi",
 		cache:   make(map[string]*DepsDevDependencyGraph),
 	}
 }
 
-// GetDependencies fetches the pre-computed dependency graph for a PyPI package version.
-// This is a single HTTP GET that returns the full transitive dependency tree —
-// no package downloads required.
-func (c *PyPIDepsDevClient) GetDependencies(ctx context.Context, name, version string) (*DepsDevDependencyGraph, error) {
-	cacheKey := name + "@" + version
+// NewMavenDepsDevClient creates a new client for Maven dependencies via the deps.dev REST API.
+func NewMavenDepsDevClient(baseURL string) *DepsDevRESTClient {
+	return &DepsDevRESTClient{
+		baseURL: baseURL,
+		system:  "maven",
+		cache:   make(map[string]*DepsDevDependencyGraph),
+	}
+}
+
+// GetDependencies fetches the pre-computed dependency graph for a package version.
+// This is a single HTTP GET that returns the full transitive dependency tree.
+func (c *DepsDevRESTClient) GetDependencies(ctx context.Context, name, version string) (*DepsDevDependencyGraph, error) {
+	cacheKey := c.system + "/" + name + "@" + version
 
 	c.mu.Lock()
 	if cached, ok := c.cache[cacheKey]; ok {
@@ -69,9 +81,10 @@ func (c *PyPIDepsDevClient) GetDependencies(ctx context.Context, name, version s
 	}
 	c.mu.Unlock()
 
-	// Build URL: {baseURL}/v3/systems/pypi/packages/{name}/versions/{version}:dependencies
-	reqURL := fmt.Sprintf("%s/v3/systems/pypi/packages/%s/versions/%s:dependencies",
+	// Build URL: {baseURL}/v3/systems/{system}/packages/{name}/versions/{version}:dependencies
+	reqURL := fmt.Sprintf("%s/v3/systems/%s/packages/%s/versions/%s:dependencies",
 		c.baseURL,
+		c.system,
 		url.PathEscape(name),
 		url.PathEscape(version),
 	)
